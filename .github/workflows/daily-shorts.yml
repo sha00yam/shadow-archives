@@ -1,0 +1,53 @@
+name: Daily Shorts
+
+# Runs every day at 5:00 AM IST (23:30 UTC previous day).
+# Also allows a manual test run from the Actions tab.
+on:
+  schedule:
+    - cron: "30 23 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-shorts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system tools (FFmpeg)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+
+      - name: Generate 4 Shorts
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        run: python scripts/generate.py
+
+      - name: Upload videos as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shorts-${{ github.run_id }}
+          path: output/
+          retention-days: 90
+
+      - name: Save updated topic tracker
+        run: |
+          git config user.name "shadow-archives-bot"
+          git config user.email "bot@shadowarchives.local"
+          git add scripts/topics.csv || true
+          git diff --cached --quiet || git commit -m "Mark today's topics done [skip ci]"
+          git push || true
