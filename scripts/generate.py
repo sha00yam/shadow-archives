@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-Shadow Archives — Daily Shorts pipeline v1
-Free tools only: Gemini (scripts) + edge-tts (voice) + Pexels (stock video) + FFmpeg.
+Shadow Archives — Daily Shorts pipeline v1.3
+Language: Hinglish — Hindi voice (Devanagari script), Roman Hindi captions/titles.
+Length: ~60 seconds per Short (YouTube Shorts max).
+Ratio: 1080x1920 vertical (9:16), 30fps, H.264 + AAC — ready to upload.
+
+Free tools only: Gemini (scripts) + Piper offline Hindi voice + Pixabay
+(stock video) + FFmpeg. Pexels kept as fallback if a key ever exists.
 
 Reads scripts/topics.csv, picks the next 4 pending topics,
 renders 4 vertical Shorts into output/, and marks topics done.
@@ -9,18 +14,17 @@ Run by GitHub Actions daily. Also runnable locally for testing.
 
 Env vars:
   GEMINI_API_KEY — Google AI Studio key (free)
-  PEXELS_API_KEY — Pexels API key (free)
+  PIXABAY_API_KEY — Pixabay API key (free)
+  PEXELS_API_KEY — Pexels API key (free, optional)
 """
 import asyncio
 import csv
-import json
 import math
 import os
 import random
 import re
 import subprocess
 import sys
-import textwrap
 from pathlib import Path
 
 import requests
@@ -30,25 +34,26 @@ try:
 except ImportError:
     edge_tts = None
 
-# Piper (offline neural TTS) and gTTS are lazy-imported inside make_voice
-# so a missing package never breaks the whole script.
+# Piper (offline neural TTS), gTTS and transliteration are lazy-imported
+# inside their functions so a missing package never breaks the whole script.
 
 ROOT = Path(__file__).resolve().parent.parent
 TOPICS_CSV = ROOT / "scripts" / "topics.csv"
 OUTPUT = ROOT / "output"
 WORK = ROOT / "work"
 
-VOICE = "en-US-GuyNeural"
-VOICE_RATE = "-5%"
-# Piper (offline, runs on the GitHub runner — never blocked like edge-tts):
-# calm male narrator voice, slightly slowed for the mysterious tone.
-PIPER_VOICE = "en_US-lessac-medium"
+# --- Voice: Hindi, male narrator (Piper offline — runs on the GitHub runner,
+# never blocked like edge-tts). Tested: ~180 Hindi words/min at length 1.1,
+# so 160-175 words = ~55-60 seconds.
+PIPER_VOICE = "hi_IN-pratham-medium"
 PIPER_MODEL_URL = (
     "https://huggingface.co/rhasspy/piper-voices/resolve/main/"
-    "en/en_US/lessac/medium/en_US-lessac-medium.onnx"
+    "hi/hi_IN/pratham/medium/hi_IN-pratham-medium.onnx"
 )
 PIPER_CONFIG_URL = PIPER_MODEL_URL + ".json"
-PIPER_LENGTH_SCALE = 1.15  # higher = slower, more dramatic
+PIPER_LENGTH_SCALE = 1.1  # higher = slower, more dramatic
+EDGE_VOICE = "hi-IN-MadhurNeural"  # fallback only (blocked on runners)
+EDGE_RATE = "-5%"
 VIDEOS_PER_DAY = 4
 # Gemini model fallback chain — model names get retired, so try newest first.
 GEMINI_MODELS = [
@@ -57,20 +62,38 @@ GEMINI_MODELS = [
     "gemini-1.5-flash",
     "gemini-flash-latest",
 ]
+# YouTube Shorts must be vertical 9:16 and 60 seconds or less.
+TARGET_SECONDS = 58
 
-SCRIPT_PROMPT = """Write a 45-second YouTube Shorts script, mysterious and dramatic tone, for teens aged 13-25.
+SCRIPT_PROMPT = """You write YouTube Shorts scripts in Hindi for teens aged 13-25, mysterious and dramatic tone.
 Topic: {topic}
 Format: {format}
 Niche: {niche}
 
-Rules:
-- 120-150 words. Simple English. Short sentences.
-- Start with a 3-second hook: a secret, a shocking number, or a question.
-- Structure: Hook -> Setup (2 lines) -> Reveal (3-4 lines) -> Twist (1-2 lines) -> End with one question for viewers.
-- Every factual claim must be true and well-known. If you are not sure, say so and pick a safer angle.
-- No health, finance, or legal advice. No politics. No conspiracy presented as fact.
-- No mention of AI, no stage directions. Only the spoken words.
-- At the very end, on separate lines starting with "SOURCE:", list 2 sources for the main fact (not spoken).
+The script must be DEEP, not shallow: go into real detail — names, dates, numbers, how it happened, why it matters. The viewer must learn something surprising, not just hear a generic summary.
+
+Return your answer in EXACTLY these 4 sections, with these exact headings:
+
+DEVANAGARI:
+Write the full spoken script in Hindi, Devanagari script, 160-175 words (about 55-60 seconds spoken). Simple, spoken Hindi, short sentences.
+Structure:
+1. Hook (first 3 seconds): a secret, a shocking number, or a question.
+2. Setup (2-3 lines): context — what, when, where.
+3. Deep dive (3 points): three surprising details or revelations, each with a specific fact (a name, date, number or reason). Go deeper with each point.
+4. Mid-hook (1 line in the middle): "lekin sabse bada raaz abhi baaki hai" type line to keep viewers watching.
+5. Twist / payoff (2 lines): the most surprising part.
+6. End with one question for viewers to answer in comments.
+Every factual claim must be true and well-known. If unsure, pick a safer angle.
+No health, finance, or legal advice. No politics. No conspiracy presented as fact. No mention of AI, no stage directions. Only the spoken words.
+
+HINGLISH:
+Write the SAME script, word for word in meaning, in Roman Hindi (Hinglish, Hindi written in English letters, natural like "Dimaag ke baare mein yeh sach koi nahi batata"). Same length. This is shown as captions on screen.
+
+TITLE:
+One Hinglish (Roman Hindi) YouTube Shorts title, under 60 characters, mysterious and dramatic, no clickbait lies. Only the title, nothing else.
+
+SOURCE:
+List 2 sources for the main fact, one per line starting with "SOURCE:".
 """
 
 
@@ -121,7 +144,7 @@ def _gemini_call(prompt, key):
                     headers=headers,
                     params=params,
                     json={"contents": [{"parts": [{"text": prompt}]}]},
-                    timeout=60,
+                    timeout=90,
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -133,8 +156,38 @@ def _gemini_call(prompt, key):
     raise RuntimeError(f"All Gemini models failed. Last error: {last_err}")
 
 
+def parse_script_response(text):
+    """Split a Gemini reply into (devanagari, hinglish, title, sources).
+    Missing sections fall back gracefully."""
+    sections = {"devanagari": "", "hinglish": "", "title": ""}
+    sources = []
+    current = None
+    for raw in text.strip().splitlines():
+        ln = raw.strip()
+        if not ln:
+            continue
+        upper = ln.upper().rstrip(":")
+        if upper in ("DEVANAGARI", "HINGLISH", "TITLE"):
+            current = upper.lower()
+            # Allow "TITLE: ..." on the same line.
+            rest = ln.split(":", 1)[1].strip() if ":" in ln else ""
+            if rest:
+                sections[current] += rest + " "
+            continue
+        if ln.upper().startswith("SOURCE:"):
+            sources.append(ln[7:].strip())
+            current = None
+            continue
+        if current:
+            sections[current] += ln + " "
+    dev = re.sub(r"\s+", " ", sections["devanagari"]).strip()
+    hin = re.sub(r"\s+", " ", sections["hinglish"]).strip()
+    title = re.sub(r"\s+", " ", sections["title"]).strip()
+    return dev, hin, title, sources
+
+
 def gemini_script(topic_row):
-    """Write a script with Gemini free tier. Returns (script_text, sources)."""
+    """Write a Hindi script with Gemini. Returns (devanagari, hinglish, title, sources)."""
     key = os.environ.get("GEMINI_API_KEY", "")
     if not key:
         raise RuntimeError("GEMINI_API_KEY not set")
@@ -142,7 +195,16 @@ def gemini_script(topic_row):
         topic=topic_row["topic"], format=topic_row["format"], niche=topic_row["niche"]
     )
     text = _gemini_call(prompt, key)
-    return split_sources(text)
+    dev, hin, title, sources = parse_script_response(text)
+    if not dev:
+        # Gemini ignored the section format: treat the whole reply as the script.
+        dev, sources = split_sources(text)
+        hin = ""
+    if not hin:
+        hin = devanagari_to_hinglish(dev)
+    if not title:
+        title = make_title(topic_row)
+    return dev, hin, title, sources
 
 
 def split_sources(text):
@@ -158,34 +220,85 @@ def split_sources(text):
     return script, sources
 
 
-def fallback_script(topic_row):
-    """Template script used only if Gemini fails, so the video still renders."""
-    t = topic_row["topic"]
-    return (
-        f"Nobody tells you this about {t.lower()}. "
-        f"Most people believe the simple version, but the real story is stranger. "
-        f"Scientists and historians have looked at this for years, and what they found "
-        f"changes how you see it. The details are hidden in plain sight, once you know "
-        f"where to look. And the strangest part? It still affects us today. "
-        f"What do you think is the most surprising part of this story?"
-    )
+def devanagari_to_hinglish(dev_text):
+    """Transliterate Devanagari to Roman Hinglish (fallback when Gemini gives
+    no HINGLISH section). ITRANS output is cleaned to read like natural Hinglish."""
+    try:
+        from indic_transliteration import sanscript
 
-
-def make_title(topic_row, script):
-    topic = topic_row["topic"]
-    templates = [
-        f"The Secret Behind {topic[:40]}",
-        f"What Nobody Tells You About {topic[:35]}",
-        f"This Changes Everything You Knew",
-        f"The Hidden Truth of {topic[:40]}",
+        roman = sanscript.transliterate(dev_text, sanscript.DEVANAGARI, sanscript.ITRANS)
+        roman = roman.replace("|", ". ")  # danda (।) renders as a pipe in ITRANS
+    except Exception:
+        return dev_text
+    # ITRANS uses capitals for long vowels: A->aa, I->ee, U->oo, RRi->ri etc.
+    fixes = [
+        ("RRi", "ri"), ("RRI", "ri"), ("LLi", "li"),
+        ("AU", "au"), ("AI", "ai"),
+        ("A", "aa"), ("I", "ee"), ("U", "oo"),
+        ("M", "n"), ("H", "h"), ("~N", "n"),
+        ("chh", "chh"), ("Sh", "sh"), ("shh", "sh"),
     ]
-    title = random.choice(templates)
-    return title[:60]
+    for old, new in fixes:
+        roman = roman.replace(old, new)
+    # Natural Hinglish polish: drop the word-final inherent 'a'
+    # ("dimaaga" -> "dimaag", "sacha" -> "sach") and fix common words.
+    words = []
+    common = {"men": "mein", "koee": "koi", "yaha": "yeh", "aapako": "aapko",
+              "hee": "hi", "bhee": "bhi", "vahaa": "waha", "yahaa": "yaha"}
+    for w in roman.lower().split():
+        w = common.get(w, w)
+        if len(w) > 2 and w.endswith("a"):
+            w = w[:-1]
+        words.append(w)
+    roman = " ".join(words)
+    # Capitalise the first letter of each sentence.
+    roman = re.sub(r"(^|[.!?] )([a-z])", lambda m: m.group(1) + m.group(2).upper(), roman)
+    roman = re.sub(r"\s+", " ", roman).strip()
+    return roman
+
+
+def fallback_script(topic_row):
+    """Longer Devanagari template used only if Gemini fails, so the video
+    still renders at ~55 seconds. Returns (devanagari, hinglish, title, sources)."""
+    t = topic_row["topic"]
+    dev = (
+        f"क्या आपको पता है, {t} के पीछे एक ऐसा सच छिपा है जिसे कोई नहीं बताता। "
+        f"ज्यादातर लोग सिर्फ ऊपरी कहानी जानते हैं, लेकिन असली कहानी उससे कहीं ज्यादा गहरी है। "
+        f"पहली बात, वैज्ञानिकों और इतिहासकारों ने इस पर सालों तक शोध किया है, और उन्हें ऐसे सबूत मिले "
+        f"जो हमारी सोच को पूरी तरह बदल देते हैं। "
+        f"दूसरी बात, इसके पीछे की वजह इतनी हैरान करने वाली है कि सुनकर आप भी चौंक जाएंगे, "
+        f"क्योंकि यह हमारी रोज़मर्रा की ज़िंदगी से सीधे जुड़ी हुई है। "
+        f"लेकिन सबसे बड़ा राज़ अभी बाकी है। "
+        f"तीसरी और सबसे चौंकाने वाली बात यह है कि इसका असर आज भी हमारे आसपास देखा जा सकता है, "
+        f"और आने वाले समय में यह और भी बड़ा हो सकता है। "
+        f"इसीलिए यह कहानी इतनी खास है, और इसीलिए लोग इसके बारे में जानना चाहते हैं। "
+        f"आपको इस कहानी का कौन सा हिस्सा सबसे ज्यादा हैरान करता है? कमेंट में बताइए।"
+    )
+    hin = devanagari_to_hinglish(dev)
+    return dev, hin, make_title(topic_row), []
+
+
+def make_title(topic_row, title=""):
+    """Hinglish title, cut at a word boundary under 60 chars."""
+    if title:
+        title = title.strip().strip('"').strip()
+        if len(title) <= 60:
+            return title
+        cut = title[:60].rsplit(" ", 1)[0]
+        return cut
+    templates = [
+        "Yeh Sach Aapko Hairan Kar Dega!",
+        "Kya Aapko Yeh Pata Tha?",
+        "Is Raaz Ko Koi Nahi Batata!",
+        "Yeh Kahani Sun Kar Dang Reh Jaoge!",
+        "Chhupa Hua Sach, Aakhir Khul Gaya!",
+    ]
+    return random.choice(templates)
 
 
 # ---------------------------------------------------------------- voice
 def _voice_piper(script, out_wav):
-    """Offline neural voice (primary). Downloads the voice model once."""
+    """Offline Hindi neural voice (primary). Downloads the voice model once."""
     from piper import PiperVoice
     import wave
 
@@ -194,7 +307,7 @@ def _voice_piper(script, out_wav):
     model_path = model_dir / f"{PIPER_VOICE}.onnx"
     config_path = model_dir / f"{PIPER_VOICE}.onnx.json"
     if not model_path.exists():
-        log("Downloading Piper voice model (one-time, ~60MB)...")
+        log("Downloading Piper Hindi voice model (one-time, ~60MB)...")
         download(PIPER_MODEL_URL, model_path)
         download(PIPER_CONFIG_URL, config_path)
     voice = PiperVoice.load(str(model_path))
@@ -209,7 +322,7 @@ def _voice_piper(script, out_wav):
 async def _voice_edge(script, out_mp3):
     if edge_tts is None:
         raise RuntimeError("edge-tts not installed")
-    communicate = edge_tts.Communicate(script, VOICE, rate=VOICE_RATE)
+    communicate = edge_tts.Communicate(script, EDGE_VOICE, rate=EDGE_RATE)
     await communicate.save(str(out_mp3))
     return out_mp3
 
@@ -217,24 +330,24 @@ async def _voice_edge(script, out_mp3):
 def _voice_gtts(script, out_mp3):
     from gtts import gTTS
 
-    gTTS(text=script, lang="en").save(str(out_mp3))
+    gTTS(text=script, lang="hi").save(str(out_mp3))
     return out_mp3
 
 
 def make_voice(script, slug_base):
-    """Create the voiceover. Tries Piper (offline) -> edge-tts -> gTTS.
+    """Create the Hindi voiceover. Tries Piper (offline) -> edge-tts -> gTTS.
     Returns the path of the created audio file (.wav or .mp3)."""
     wav_path = Path(str(slug_base) + "_voice.wav")
     mp3_path = Path(str(slug_base) + "_voice.mp3")
     try:
-        log("Voice: trying Piper (offline neural)...")
+        log("Voice: trying Piper Hindi (offline neural)...")
         return _voice_piper(script, wav_path)
     except Exception as e:
         log(f"Piper failed ({e}); trying edge-tts...")
     try:
         return asyncio.run(_voice_edge(script, mp3_path))
     except Exception as e:
-        log(f"edge-tts failed ({e}); trying gTTS...")
+        log(f"edge-tts failed ({e}); trying gTTS Hindi...")
     return _voice_gtts(script, mp3_path)
 
 
@@ -248,7 +361,7 @@ def audio_duration(path):
 
 
 # ---------------------------------------------------------------- visuals
-def pexels_clips(keywords, count=3):
+def pexels_clips(keywords, count=5):
     """Fetch free stock video URLs from Pexels. Returns list of mp4 URLs."""
     key = os.environ.get("PEXELS_API_KEY", "")
     if not key:
@@ -279,7 +392,7 @@ def download(url, dest):
     dest.write_bytes(r.content)
 
 
-def pixabay_clips(keywords, count=3):
+def pixabay_clips(keywords, count=5):
     """Fetch free stock video URLs from Pixabay. Returns list of mp4 URLs.
     Pixabay is the primary source when no Pexels key exists (Pexels paused
     new key issuance in Nov 2026)."""
@@ -309,10 +422,11 @@ def pixabay_clips(keywords, count=3):
 
 
 # ---------------------------------------------------------------- captions
-def make_ass(script, duration, ass_path):
-    """Split script into timed caption chunks, styled for Shorts.
-    White bold text, black outline, centred lower-third."""
-    words = script.split()
+def make_ass(caption_text, duration, ass_path):
+    """Split Hinglish captions into timed chunks, styled for Shorts.
+    White bold text, black outline, just above middle of screen
+    (clear of YouTube's bottom UI overlays)."""
+    words = caption_text.split()
     if not words:
         words = ["Shadow", "Archives"]
     # ~3 words per caption chunk, timed evenly across the audio.
@@ -325,7 +439,7 @@ PlayResY: 1920
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,DejaVu Sans,64,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,0,2,60,60,420,1
+Style: Default,DejaVu Sans,64,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,0,2,60,60,900,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -343,41 +457,29 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 # ---------------------------------------------------------------- assembly
-def build_video(clips, voice_mp3, ass_path, out_mp4, duration):
-    """Assemble a 1080x1920 Short with FFmpeg.
-    Stock clips are cropped/scaled to vertical with a slow zoom.
-    Falls back to a dark solid background if no clips downloaded."""
-    dur = math.ceil(duration)
+def build_video(clips, voice_path, ass_path, out_mp4, duration):
+    """Assemble a 1080x1920 (9:16) 30fps Short with FFmpeg, capped at 58s.
+    Stock clips are cropped/scaled to vertical. Falls back to a dark solid
+    background if no clips downloaded."""
+    dur = min(math.ceil(duration), TARGET_SECONDS)
     if clips:
-        # Build one vertical video from the clips, each shown ~8s.
+        # Spread clips evenly across the video, each shown ~8-12s.
         seg = max(5, dur // len(clips))
         inputs, filters = [], []
         for i, c in enumerate(clips):
             inputs += ["-i", str(c)]
             filters.append(
                 f"[{i}:v]scale=1080:1920:force_original_aspect_ratio=increase,"
-                f"crop=1080:1920,setsar=1,trim=0:{seg},setpts=PTS-STARTPTS[v{i}]"
+                f"crop=1080:1920,setsar=1,fps=30,trim=0:{seg},setpts=PTS-STARTPTS[v{i}]"
             )
         concat = "".join(f"[v{i}]" for i in range(len(clips)))
-        filters.append(f"{concat}concat=n={len(clips)}:v=1:a=0,trim=0:{dur},setpts=PTS-STARTPTS[vout]")
-        filtergraph = ";".join(filters)
-        cmd = ["ffmpeg", "-y"] + inputs + [
-            "-i", str(voice_mp3),
-            "-filter_complex", filtergraph,
-            "-map", "[vout]", "-map", f"{len(clips)}:a",
-            "-vf", f"subtitles={ass_path}",
-            "-t", str(dur), "-c:v", "libx264", "-preset", "veryfast",
-            "-c:a", "aac", "-shortest", str(out_mp4),
-        ]
-        # Note: -vf after -filter_complex conflicts; use subtitles inside filtergraph instead.
-        # Rebuild with subtitles as the last filter step.
-        filters[-1] = (
-            f"{concat}concat=n={len(clips)}:v=1:a=0,trim=0:{dur},setpts=PTS-STARTPTS,"
-            f"subtitles={ass_path}[vout]"
+        filters.append(
+            f"{concat}concat=n={len(clips)}:v=1:a=0,fps=30,trim=0:{dur},"
+            f"setpts=PTS-STARTPTS,subtitles={ass_path}[vout]"
         )
         filtergraph = ";".join(filters)
         cmd = ["ffmpeg", "-y"] + inputs + [
-            "-i", str(voice_mp3),
+            "-i", str(voice_path),
             "-filter_complex", filtergraph,
             "-map", "[vout]", "-map", f"{len(clips)}:a",
             "-t", str(dur), "-c:v", "libx264", "-preset", "veryfast",
@@ -385,8 +487,8 @@ def build_video(clips, voice_mp3, ass_path, out_mp4, duration):
         ]
     else:
         cmd = ["ffmpeg", "-y",
-               "-f", "lavfi", "-i", f"color=c=0x0A0E1A:s=1080x1920:d={dur}",
-               "-i", str(voice_mp3),
+               "-f", "lavfi", "-i", f"color=c=0x0A0E1A:s=1080x1920:d={dur},fps=30",
+               "-i", str(voice_path),
                "-vf", f"subtitles={ass_path}",
                "-t", str(dur), "-c:v", "libx264", "-preset", "veryfast",
                "-c:a", "aac", "-shortest", str(out_mp4)]
@@ -410,20 +512,20 @@ def main():
         log(f"--- [{idx}/{len(today)}] {row['topic']}")
         try:
             try:
-                script, sources = gemini_script(row)
-                log(f"Script from Gemini ({len(script.split())} words)")
+                dev, hin, title, sources = gemini_script(row)
+                log(f"Script from Gemini ({len(dev.split())} Hindi words)")
             except Exception as e:
                 log(f"Gemini failed ({e}); using fallback script")
-                script, sources = fallback_script(row), []
+                dev, hin, title, sources = fallback_script(row)
 
-            voice_path = make_voice(script, WORK / slug)
+            voice_path = make_voice(dev, WORK / slug)
             duration = audio_duration(voice_path)
             log(f"Voice: {duration:.1f}s")
 
             # Visuals: Pexels first, Pixabay as primary fallback.
-            clip_urls = pexels_clips(row["keywords"], count=3)
+            clip_urls = pexels_clips(row["keywords"], count=5)
             if not clip_urls:
-                clip_urls = pixabay_clips(row["keywords"], count=3)
+                clip_urls = pixabay_clips(row["keywords"], count=5)
             clips = []
             for j, url in enumerate(clip_urls):
                 try:
@@ -435,18 +537,17 @@ def main():
             log(f"Clips: {len(clips)} downloaded")
 
             ass_path = WORK / f"{slug}.ass"
-            make_ass(script, duration, ass_path)
+            make_ass(hin, min(duration, TARGET_SECONDS), ass_path)
 
             out_mp4 = OUTPUT / f"{slug}.mp4"
             build_video(clips, voice_path, ass_path, out_mp4, duration)
             log(f"Rendered: {out_mp4.name}")
 
-            title = make_title(row, script)
             tag = re.sub(r"[^A-Za-z0-9]", "", row["topic"].split()[0].capitalize())
             desc = (
-                f"{title}\n\n{script[:180]}...\n\n"
-                f"Follow Shadow Archives for a secret every day.\n"
-                f"#Shorts #Facts #History #WhatIf #{tag}"
+                f"{title}\n\n{hin[:180]}...\n\n"
+                f"Roz ek naya raaz — Shadow Archives ko follow karo.\n"
+                f"#Shorts #Facts #History #WhatIf #{tag} #HindiShorts"
             )
             manifest.append({"file": out_mp4.name, "title": title, "description": desc,
                              "topic": row["topic"], "sources": sources})
