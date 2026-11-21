@@ -189,6 +189,35 @@ def download(url, dest):
     dest.write_bytes(r.content)
 
 
+def pixabay_clips(keywords, count=3):
+    """Fetch free stock video URLs from Pixabay. Returns list of mp4 URLs.
+    Pixabay is the primary source when no Pexels key exists (Pexels paused
+    new key issuance in Nov 2026)."""
+    key = os.environ.get("PIXABAY_API_KEY", "")
+    if not key:
+        return []
+    try:
+        resp = requests.get(
+            "https://pixabay.com/api/videos/",
+            params={"key": key, "q": keywords, "orientation": "vertical",
+                    "per_page": count, "safesearch": "true"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        urls = []
+        for hit in resp.json().get("hits", []):
+            videos = hit.get("videos", {})
+            # Prefer medium (vertical-friendly), fall back to small/large.
+            for size in ("medium", "small", "large", "tiny"):
+                if size in videos and videos[size].get("url"):
+                    urls.append(videos[size]["url"])
+                    break
+        return urls[:count]
+    except Exception as e:
+        log(f"Pixabay failed ({e}); using solid background fallback")
+        return []
+
+
 # ---------------------------------------------------------------- captions
 def make_ass(script, duration, ass_path):
     """Split script into timed caption chunks, styled for Shorts.
@@ -302,8 +331,10 @@ def main():
             duration = audio_duration(voice_path)
             log(f"Voice: {duration:.1f}s")
 
-            # Visuals
+            # Visuals: Pexels first, Pixabay as primary fallback.
             clip_urls = pexels_clips(row["keywords"], count=3)
+            if not clip_urls:
+                clip_urls = pixabay_clips(row["keywords"], count=3)
             clips = []
             for j, url in enumerate(clip_urls):
                 try:
