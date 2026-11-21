@@ -30,6 +30,9 @@ try:
 except ImportError:
     edge_tts = None
 
+# Piper (offline neural TTS) and gTTS are lazy-imported inside make_voice
+# so a missing package never breaks the whole script.
+
 ROOT = Path(__file__).resolve().parent.parent
 TOPICS_CSV = ROOT / "scripts" / "topics.csv"
 OUTPUT = ROOT / "output"
@@ -37,7 +40,23 @@ WORK = ROOT / "work"
 
 VOICE = "en-US-GuyNeural"
 VOICE_RATE = "-5%"
+# Piper (offline, runs on the GitHub runner — never blocked like edge-tts):
+# calm male narrator voice, slightly slowed for the mysterious tone.
+PIPER_VOICE = "en_US-lessac-medium"
+PIPER_MODEL_URL = (
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/"
+    "en/en_US/lessac/medium/en_US-lessac-medium.onnx"
+)
+PIPER_CONFIG_URL = PIPER_MODEL_URL + ".json"
+PIPER_LENGTH_SCALE = 1.15  # higher = slower, more dramatic
 VIDEOS_PER_DAY = 4
+# Gemini model fallback chain — model names get retired, so try newest first.
+GEMINI_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-flash-latest",
+]
 
 SCRIPT_PROMPT = """Write a 45-second YouTube Shorts script, mysterious and dramatic tone, for teens aged 13-25.
 Topic: {topic}
@@ -79,6 +98,41 @@ def pick_today(rows):
 
 
 # ---------------------------------------------------------------- scripts
+def _gemini_call(prompt, key):
+    """Try each Gemini model in turn. Returns script text or raises."""
+    last_err = None
+    # Keys starting with "AQ." are OAuth-style tokens: send as Bearer header.
+    # Standard AI Studio keys (AIza...) go in the ?key= query param.
+    use_bearer = key.startswith("AQ.")
+    for model in GEMINI_MODELS:
+        for api_version in ("v1beta", "v1"):
+            url = (
+                f"https://generativelanguage.googleapis.com/{api_version}/models/"
+                f"{model}:generateContent"
+            )
+            headers, params = {}, {}
+            if use_bearer:
+                headers["Authorization"] = f"Bearer {key}"
+            else:
+                params["key"] = key
+            try:
+                resp = requests.post(
+                    url,
+                    headers=headers,
+                    params=params,
+                    json={"contents": [{"parts": [{"text": prompt}]}]},
+                    timeout=60,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return data["candidates"][0]["content"]["parts"][0]["text"]
+            except Exception as e:
+                last_err = e
+                log(f"Gemini {model} ({api_version}) failed: {e}")
+                continue
+    raise RuntimeError(f"All Gemini models failed. Last error: {last_err}")
+
+
 def gemini_script(topic_row):
     """Write a script with Gemini free tier. Returns (script_text, sources)."""
     key = os.environ.get("GEMINI_API_KEY", "")
@@ -87,18 +141,7 @@ def gemini_script(topic_row):
     prompt = SCRIPT_PROMPT.format(
         topic=topic_row["topic"], format=topic_row["format"], niche=topic_row["niche"]
     )
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={key}"
-    )
-    resp = requests.post(
-        url,
-        json={"contents": [{"parts": [{"text": prompt}]}]},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    text = data["candidates"][0]["content"]["parts"][0]["text"]
+    text = _gemini_call(prompt, key)
     return split_sources(text)
 
 
@@ -141,11 +184,58 @@ def make_title(topic_row, script):
 
 
 # ---------------------------------------------------------------- voice
-async def make_voice(script, out_mp3):
+def _voice_piper(script, out_wav):
+    """Offline neural voice (primary). Downloads the voice model once."""
+    from piper import PiperVoice
+    import wave
+
+    model_dir = WORK / "models"
+    model_dir.mkdir(exist_ok=True)
+    model_path = model_dir / f"{PIPER_VOICE}.onnx"
+    config_path = model_dir / f"{PIPER_VOICE}.onnx.json"
+    if not model_path.exists():
+        log("Downloading Piper voice model (one-time, ~60MB)...")
+        download(PIPER_MODEL_URL, model_path)
+        download(PIPER_CONFIG_URL, config_path)
+    voice = PiperVoice.load(str(model_path))
+    with wave.open(str(out_wav), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(voice.config.sample_rate)
+        voice.synthesize(script, wav_file, length_scale=PIPER_LENGTH_SCALE)
+    return out_wav
+
+
+async def _voice_edge(script, out_mp3):
     if edge_tts is None:
         raise RuntimeError("edge-tts not installed")
     communicate = edge_tts.Communicate(script, VOICE, rate=VOICE_RATE)
     await communicate.save(str(out_mp3))
+    return out_mp3
+
+
+def _voice_gtts(script, out_mp3):
+    from gtts import gTTS
+
+    gTTS(text=script, lang="en").save(str(out_mp3))
+    return out_mp3
+
+
+def make_voice(script, slug_base):
+    """Create the voiceover. Tries Piper (offline) -> edge-tts -> gTTS.
+    Returns the path of the created audio file (.wav or .mp3)."""
+    wav_path = Path(str(slug_base) + "_voice.wav")
+    mp3_path = Path(str(slug_base) + "_voice.mp3")
+    try:
+        log("Voice: trying Piper (offline neural)...")
+        return _voice_piper(script, wav_path)
+    except Exception as e:
+        log(f"Piper failed ({e}); trying edge-tts...")
+    try:
+        return asyncio.run(_voice_edge(script, mp3_path))
+    except Exception as e:
+        log(f"edge-tts failed ({e}); trying gTTS...")
+    return _voice_gtts(script, mp3_path)
 
 
 def audio_duration(path):
@@ -326,8 +416,7 @@ def main():
                 log(f"Gemini failed ({e}); using fallback script")
                 script, sources = fallback_script(row), []
 
-            voice_path = WORK / f"{slug}_voice.mp3"
-            asyncio.run(make_voice(script, voice_path))
+            voice_path = make_voice(script, WORK / slug)
             duration = audio_duration(voice_path)
             log(f"Voice: {duration:.1f}s")
 
@@ -363,8 +452,8 @@ def main():
                              "topic": row["topic"], "sources": sources})
             row["status"] = "done"
         except Exception as e:
-            log(f"FAILED {slug}: {e} — skipping, other videos continue")
-            row["status"] = "failed"
+            log(f"FAILED {slug}: {e} — will retry next run, other videos continue")
+            # status stays "pending" so the topic is retried on the next run
 
     # Titles + descriptions file for easy copy-paste at upload
     lines = []
@@ -379,6 +468,9 @@ def main():
     (OUTPUT / "titles.txt").write_text("\n".join(lines), encoding="utf-8")
     save_topics(rows)
     log(f"Done. {len(manifest)} videos in output/")
+    if not manifest:
+        log("ERROR: 0 videos rendered — failing the run so it shows red, not green")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -42,9 +42,9 @@ Follow Shadow Archives for a secret every day.
 Cinematic, dark, moody, dramatic lighting, photorealistic, 9:16 vertical, no text, no watermark: {scene_description}
 ```
 
-## Voice settings (edge-tts, fixed — never change mid-channel)
+## Voice settings (fixed — never change mid-channel)
 
-- Voice: en-US-GuyNeural
-- Rate: -5%
-- Pitch: +0Hz
-- Backup voices (only if Guy fails): en-US-ChristopherNeural, en-GB-RyanNeural
+Primary: Piper offline neural voice `en_US-lessac-medium`, length scale 1.15 (slightly slow, dramatic).
+Why Piper: edge-tts returns 403 from GitHub's servers (Microsoft blocks datacentre IPs), so Piper — which runs locally on the runner — is the reliable voice.
+Fallbacks, in order: edge-tts `en-US-GuyNeural` rate -5%, then gTTS.
+Backup Piper voices (only if lessac fails): `en_US-ryan-high`, `en_US-libritts_r-medium`.
