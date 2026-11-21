@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Shadow Archives — Daily Shorts pipeline v1.4
+Shadow Archives — Daily Shorts pipeline v1.5
 Language: Hinglish — Hindi voice (Devanagari script), Roman Hindi captions/titles.
 Length: ~60 seconds per Short (YouTube Shorts max).
 Ratio: 1080x1920 vertical (9:16), 30fps, H.264 + AAC — ready to upload.
 v1.4: per-sentence voice synthesis with measured timing (captions in sync),
 pure-Hindi scripts (no English words in Devanagari), loudness normalisation.
+v1.5: stock clips loop to fill their segment (short clips no longer truncate
+the video's ending); transliteration fixes (comment, bataiye).
 
 Free tools only: Gemini (scripts) + Piper offline Hindi voice + Pixabay
 (stock video) + FFmpeg. Pexels kept as fallback if a key ever exists.
@@ -245,14 +247,20 @@ def devanagari_to_hinglish(dev_text):
         roman = roman.replace(old, new)
     # Natural Hinglish polish: drop the word-final inherent 'a'
     # ("dimaaga" -> "dimaag", "sacha" -> "sach") and fix common words.
+    # Lookup ignores trailing punctuation ("bataaie." still matches).
     words = []
     common = {"men": "mein", "koee": "koi", "yaha": "yeh", "aapako": "aapko",
-              "hee": "hi", "bhee": "bhi", "vahaa": "waha", "yahaa": "yaha"}
+              "hee": "hi", "bhee": "bhi", "vahaa": "waha", "yahaa": "yaha",
+              "kament": "comment", "kamenta": "comment", "bataaie": "bataiye"}
     for w in roman.lower().split():
+        punct = ""
+        while w and w[-1] in ".,?!":
+            punct = w[-1] + punct
+            w = w[:-1]
         w = common.get(w, w)
         if len(w) > 2 and w.endswith("a"):
             w = w[:-1]
-        words.append(w)
+        words.append(w + punct)
     roman = " ".join(words)
     # Capitalise the first letter of each sentence.
     roman = re.sub(r"(^|[.!?] )([a-z])", lambda m: m.group(1) + m.group(2).upper(), roman)
@@ -540,10 +548,13 @@ def build_video(clips, voice_path, ass_path, out_mp4, duration):
     dur = min(math.ceil(duration), TARGET_SECONDS)
     if clips:
         # Spread clips evenly across the video, each shown ~8-12s.
+        # -stream_loop -1 loops a short stock clip so its segment always
+        # fills its time — without it, short clips truncated the video
+        # (run #4 slot 3 lost ~5s of voice to -shortest).
         seg = max(5, dur // len(clips))
         inputs, filters = [], []
         for i, c in enumerate(clips):
-            inputs += ["-i", str(c)]
+            inputs += ["-stream_loop", "-1", "-i", str(c)]
             filters.append(
                 f"[{i}:v]scale=1080:1920:force_original_aspect_ratio=increase,"
                 f"crop=1080:1920,setsar=1,fps=30,trim=0:{seg},setpts=PTS-STARTPTS[v{i}]"
