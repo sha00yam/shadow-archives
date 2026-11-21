@@ -1,39 +1,30 @@
-# Shadow Archives — AI Prompts
+# Shadow Archives — AI Prompts (v1.3 — Hinglish, 60 seconds)
+
+## Language
+- Voice speaks Hindi (Devanagari script → Piper Hindi voice).
+- Captions, titles, descriptions: Hinglish — Hindi written in English letters.
+- Topics in topics.csv stay in English; Gemini writes the Hindi script from them.
 
 ## Script prompt (Gemini, per video)
+(See SCRIPT_PROMPT in scripts/generate.py — it asks for 4 sections: DEVANAGARI, HINGLISH, TITLE, SOURCE.)
 
-```
-Write a 45-second YouTube Shorts script, mysterious and dramatic tone, for teens aged 13-25.
-Topic: {topic}
-Format: {format}
-Niche: {niche}
+- Length: 160-175 Hindi words = ~55-60 seconds spoken.
+- Deep, not shallow: 3 specific revelations with names/dates/numbers, plus a mid-video retention hook.
+- Structure: Hook → Setup → 3 deep points → Mid-hook → Twist → End question.
 
-Rules:
-- 120-150 words. Simple English. Short sentences.
-- Start with a 3-second hook: a secret, a shocking number, or a question.
-- Structure: Hook -> Setup (2 lines) -> Reveal (3-4 lines) -> Twist (1-2 lines) -> End with one question for viewers.
-- Every factual claim must be true and well-known. If you are not sure, say so and pick a safer angle.
-- No health, finance, or legal advice. No politics. No conspiracy presented as fact.
-- No mention of AI, no "as an AI", no stage directions. Only the spoken words.
-- At the very end, on separate lines starting with "SOURCE:", list 2 sources for the main fact (not spoken).
-```
-
-## Title prompt
-
-```
-Give 3 YouTube Shorts titles for this script, mysterious and dramatic, under 60 characters each, no clickbait lies. Return only the 3 titles, one per line.
-Script: {script}
-```
+## Title rules
+- Hinglish, under 60 characters, cut at a word boundary (never mid-word).
+- Example: "Yeh Sach Aapko Hairan Kar Dega!"
 
 ## Description template (no AI needed)
 
 ```
-{hook_line}
+{hinglish_title}
 
-{two_line_summary}
+{hinglish_hook_line}
 
-Follow Shadow Archives for a secret every day.
-#Shorts #Facts #History #WhatIf #{topic_tag}
+Roz ek naya raaz — Shadow Archives ko follow karo.
+#Shorts #Facts #History #WhatIf #{topic_tag} #HindiShorts
 ```
 
 ## Image prompt (for AI images, v2)
@@ -44,7 +35,15 @@ Cinematic, dark, moody, dramatic lighting, photorealistic, 9:16 vertical, no tex
 
 ## Voice settings (fixed — never change mid-channel)
 
-Primary: Piper offline neural voice `en_US-lessac-medium`, length scale 1.15 (slightly slow, dramatic).
+Primary: Piper offline Hindi voice `hi_IN-pratham-medium` (male), length scale 1.1.
 Why Piper: edge-tts returns 403 from GitHub's servers (Microsoft blocks datacentre IPs), so Piper — which runs locally on the runner — is the reliable voice.
-Fallbacks, in order: edge-tts `en-US-GuyNeural` rate -5%, then gTTS.
-Backup Piper voices (only if lessac fails): `en_US-ryan-high`, `en_US-libritts_r-medium`.
+Fallbacks, in order: edge-tts `hi-IN-MadhurNeural` rate -5%, then gTTS Hindi.
+Backup Piper voices (only if pratham fails): `hi_IN-priyamvada-medium`, `hi_IN-rohan-medium`.
+
+## Captions
+- Hinglish (Roman Hindi), bold white, black outline.
+- Position: just above middle of screen (ASS Alignment 2, MarginV 900) — clear of YouTube's bottom UI overlays and clear of the centre subject.
+
+## Video spec (YouTube Shorts ready)
+- 1080x1920 vertical (9:16), 30fps, H.264 + AAC, max 58 seconds.
+- Never exceed 60 seconds. Never change the ratio.
