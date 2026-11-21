@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Shadow Archives — Daily Shorts pipeline v1.3
+Shadow Archives — Daily Shorts pipeline v1.4
 Language: Hinglish — Hindi voice (Devanagari script), Roman Hindi captions/titles.
 Length: ~60 seconds per Short (YouTube Shorts max).
 Ratio: 1080x1920 vertical (9:16), 30fps, H.264 + AAC — ready to upload.
+v1.4: per-sentence voice synthesis with measured timing (captions in sync),
+pure-Hindi scripts (no English words in Devanagari), loudness normalisation.
 
 Free tools only: Gemini (scripts) + Piper offline Hindi voice + Pixabay
 (stock video) + FFmpeg. Pexels kept as fallback if a key ever exists.
@@ -51,7 +53,7 @@ PIPER_MODEL_URL = (
     "hi/hi_IN/pratham/medium/hi_IN-pratham-medium.onnx"
 )
 PIPER_CONFIG_URL = PIPER_MODEL_URL + ".json"
-PIPER_LENGTH_SCALE = 1.1  # higher = slower, more dramatic
+PIPER_LENGTH_SCALE = 1.05  # near-natural pace (1.15 sounded warbly)
 EDGE_VOICE = "hi-IN-MadhurNeural"  # fallback only (blocked on runners)
 EDGE_RATE = "-5%"
 VIDEOS_PER_DAY = 4
@@ -76,6 +78,7 @@ Return your answer in EXACTLY these 4 sections, with these exact headings:
 
 DEVANAGARI:
 Write the full spoken script in Hindi, Devanagari script, 160-175 words (about 55-60 seconds spoken). Simple, spoken Hindi, short sentences.
+PURE HINDI ONLY: every single word in Devanagari script. Never write any English word — translate the topic itself into Hindi. Write numbers as Hindi words (दस, सौ, हज़ार, लाख), never digits. English words make the Hindi voice mispronounce them.
 Structure:
 1. Hook (first 3 seconds): a secret, a shocking number, or a question.
 2. Setup (2-3 lines): context — what, when, where.
@@ -259,23 +262,30 @@ def devanagari_to_hinglish(dev_text):
 
 def fallback_script(topic_row):
     """Longer Devanagari template used only if Gemini fails, so the video
-    still renders at ~55 seconds. Returns (devanagari, hinglish, title, sources)."""
-    t = topic_row["topic"]
+    still renders at ~55 seconds. Returns (devanagari, hinglish, title, sources).
+    PURE Hindi — no English words: the Hindi voice mispronounces Latin text,
+    so the topic name is never inserted here."""
     dev = (
-        f"क्या आपको पता है, {t} के पीछे एक ऐसा सच छिपा है जिसे कोई नहीं बताता। "
-        f"ज्यादातर लोग सिर्फ ऊपरी कहानी जानते हैं, लेकिन असली कहानी उससे कहीं ज्यादा गहरी है। "
-        f"पहली बात, वैज्ञानिकों और इतिहासकारों ने इस पर सालों तक शोध किया है, और उन्हें ऐसे सबूत मिले "
-        f"जो हमारी सोच को पूरी तरह बदल देते हैं। "
-        f"दूसरी बात, इसके पीछे की वजह इतनी हैरान करने वाली है कि सुनकर आप भी चौंक जाएंगे, "
-        f"क्योंकि यह हमारी रोज़मर्रा की ज़िंदगी से सीधे जुड़ी हुई है। "
-        f"लेकिन सबसे बड़ा राज़ अभी बाकी है। "
-        f"तीसरी और सबसे चौंकाने वाली बात यह है कि इसका असर आज भी हमारे आसपास देखा जा सकता है, "
-        f"और आने वाले समय में यह और भी बड़ा हो सकता है। "
-        f"इसीलिए यह कहानी इतनी खास है, और इसीलिए लोग इसके बारे में जानना चाहते हैं। "
-        f"आपको इस कहानी का कौन सा हिस्सा सबसे ज्यादा हैरान करता है? कमेंट में बताइए।"
+        "क्या आपको पता है, इस कहानी के पीछे एक ऐसा सच छिपा है जिसे कोई नहीं बताता। "
+        "ज्यादातर लोग सिर्फ ऊपरी कहानी जानते हैं, लेकिन असली कहानी उससे कहीं ज्यादा गहरी है। "
+        "पहली बात, वैज्ञानिकों और इतिहासकारों ने इस पर सालों तक शोध किया है, और उन्हें ऐसे सबूत मिले "
+        "जो हमारी सोच को पूरी तरह बदल देते हैं। "
+        "दूसरी बात, इसके पीछे की वजह इतनी हैरान करने वाली है कि सुनकर आप भी चौंक जाएंगे, "
+        "क्योंकि यह हमारी रोज़मर्रा की ज़िंदगी से सीधे जुड़ी हुई है। "
+        "लेकिन सबसे बड़ा राज़ अभी बाकी है। "
+        "तीसरी और सबसे चौंकाने वाली बात यह है कि इसका असर आज भी हमारे आसपास देखा जा सकता है, "
+        "और आने वाले समय में यह और भी बड़ा हो सकता है। "
+        "इसीलिए यह कहानी इतनी खास है, और इसीलिए लोग इसके बारे में जानना चाहते हैं। "
+        "आपको इस कहानी का कौन सा हिस्सा सबसे ज्यादा हैरान करता है? कमेंट में बताइए।"
     )
     hin = devanagari_to_hinglish(dev)
     return dev, hin, make_title(topic_row), []
+
+
+def split_sentences(text):
+    """Split a script into sentences, keeping the terminator (। . ? !)."""
+    parts = re.split(r"(?<=[।.?!])\s+", text.strip())
+    return [p.strip() for p in parts if p.strip()]
 
 
 def make_title(topic_row, title=""):
@@ -297,10 +307,9 @@ def make_title(topic_row, title=""):
 
 
 # ---------------------------------------------------------------- voice
-def _voice_piper(script, out_wav):
-    """Offline Hindi neural voice (primary). Downloads the voice model once."""
+def _load_piper_voice():
+    """Load the Piper Hindi voice, downloading the model once if needed."""
     from piper import PiperVoice
-    import wave
 
     model_dir = WORK / "models"
     model_dir.mkdir(exist_ok=True)
@@ -310,12 +319,62 @@ def _voice_piper(script, out_wav):
         log("Downloading Piper Hindi voice model (one-time, ~60MB)...")
         download(PIPER_MODEL_URL, model_path)
         download(PIPER_CONFIG_URL, config_path)
-    voice = PiperVoice.load(str(model_path))
-    with wave.open(str(out_wav), "wb") as wav_file:
-        wav_file.setnchannels(1)
-        wav_file.setsampwidth(2)
-        wav_file.setframerate(voice.config.sample_rate)
-        voice.synthesize(script, wav_file, length_scale=PIPER_LENGTH_SCALE)
+    return PiperVoice.load(str(model_path))
+
+
+def _voice_piper_sentences(script, out_wav):
+    """Synthesize the script ONE SENTENCE AT A TIME with Piper, then join
+    the pieces with a short pause between them. Returns (wav_path, windows)
+    where windows is a list of (start, end) seconds per sentence — this is
+    what keeps the captions in sync with the voice instead of guessing
+    with even spacing. Also normalises loudness to stop clipping."""
+    import wave
+
+    voice = _load_piper_voice()
+    sentences = split_sentences(script)
+    if not sentences:
+        sentences = [script]
+    sr = voice.config.sample_rate
+    gap_frames = int(sr * 0.25)  # 0.25s pause between sentences
+    silence = b"\x00\x00" * gap_frames
+
+    frames, windows = [], []
+    t = 0.0
+    for i, sent in enumerate(sentences):
+        tmp = out_wav.parent / f"{out_wav.stem}_s{i}.wav"
+        with wave.open(str(tmp), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sr)
+            voice.synthesize(sent, wf, length_scale=PIPER_LENGTH_SCALE)
+        with wave.open(str(tmp), "rb") as wf:
+            data = wf.readframes(wf.getnframes())
+            dur = wf.getnframes() / sr
+        frames.append(data)
+        windows.append((round(t, 3), round(t + dur, 3)))
+        t += dur
+        if i < len(sentences) - 1:
+            frames.append(silence)
+            t += 0.25
+        tmp.unlink()
+    with wave.open(str(out_wav), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        for fr in frames:
+            wf.writeframes(fr)
+    return _normalize_audio(out_wav), windows
+
+
+def _normalize_audio(in_wav):
+    """Loudness-normalise the voice to -16 LUFS, true peak -1.5 dB, so the
+    audio never clips (run #3 peaked above 0 dB, which sounded jittery)."""
+    out_wav = in_wav.parent / (in_wav.stem + "_norm.wav")
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", str(in_wav),
+         "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", str(out_wav)],
+        check=True,
+    )
     return out_wav
 
 
@@ -335,20 +394,22 @@ def _voice_gtts(script, out_mp3):
 
 
 def make_voice(script, slug_base):
-    """Create the Hindi voiceover. Tries Piper (offline) -> edge-tts -> gTTS.
-    Returns the path of the created audio file (.wav or .mp3)."""
+    """Create the Hindi voiceover. Tries Piper (offline, per-sentence) ->
+    edge-tts -> gTTS. Returns (audio_path, windows) where windows is a
+    list of (start, end) seconds per sentence, or None for the whole-script
+    fallbacks (captions then use even spacing as before)."""
     wav_path = Path(str(slug_base) + "_voice.wav")
     mp3_path = Path(str(slug_base) + "_voice.mp3")
     try:
-        log("Voice: trying Piper Hindi (offline neural)...")
-        return _voice_piper(script, wav_path)
+        log("Voice: trying Piper Hindi (offline neural, per-sentence)...")
+        return _voice_piper_sentences(script, wav_path)
     except Exception as e:
         log(f"Piper failed ({e}); trying edge-tts...")
     try:
-        return asyncio.run(_voice_edge(script, mp3_path))
+        return asyncio.run(_voice_edge(script, mp3_path)), None
     except Exception as e:
         log(f"edge-tts failed ({e}); trying gTTS Hindi...")
-    return _voice_gtts(script, mp3_path)
+    return _voice_gtts(script, mp3_path), None
 
 
 def audio_duration(path):
@@ -422,16 +483,33 @@ def pixabay_clips(keywords, count=5):
 
 
 # ---------------------------------------------------------------- captions
-def make_ass(caption_text, duration, ass_path):
+def make_ass(caption_text, duration, ass_path, windows=None):
     """Split Hinglish captions into timed chunks, styled for Shorts.
     White bold text, black outline, just above middle of screen
-    (clear of YouTube's bottom UI overlays)."""
-    words = caption_text.split()
-    if not words:
-        words = ["Shadow", "Archives"]
-    # ~3 words per caption chunk, timed evenly across the audio.
-    chunks = [" ".join(words[i:i + 3]) for i in range(0, len(words), 3)]
-    per = duration / max(len(chunks), 1)
+    (clear of YouTube's bottom UI overlays).
+
+    When `windows` (per-sentence start/end times from the voice) is given
+    and matches the caption sentences, each sentence's words are timed
+    inside its own spoken window — captions stay in sync with the voice.
+    Otherwise falls back to even spacing across the whole duration."""
+    sentences = split_sentences(caption_text)
+    timed = bool(windows) and len(windows) == len(sentences)
+    if not timed:
+        sentences = [caption_text]
+        windows = [(0.0, duration)]
+
+    chunks = []  # (start, end, text)
+    for sent, (s_start, s_end) in zip(sentences, windows):
+        words = sent.split()
+        if not words:
+            continue
+        sent_chunks = [" ".join(words[i:i + 3]) for i in range(0, len(words), 3)]
+        span = max(s_end - s_start, 0.1)
+        per = span / len(sent_chunks)
+        for i, chunk in enumerate(sent_chunks):
+            chunks.append((s_start + i * per, min(s_start + (i + 1) * per, duration), chunk))
+    if not chunks:
+        chunks = [(0.0, duration, "Shadow Archives")]
     header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -448,9 +526,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         h = int(t // 3600); m = int((t % 3600) // 60); s = int(t % 60); cs = int((t % 1) * 100)
         return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
     events = []
-    for i, chunk in enumerate(chunks):
-        start = i * per
-        end = min((i + 1) * per, duration)
+    for start, end, chunk in chunks:
         text = chunk.replace("\\", "").replace("{", "").replace("}", "")
         events.append(f"Dialogue: 0,{fmt(start)},{fmt(end)},Default,,0,0,0,,{text}")
     ass_path.write_text(header + "\n".join(events), encoding="utf-8")
@@ -518,9 +594,9 @@ def main():
                 log(f"Gemini failed ({e}); using fallback script")
                 dev, hin, title, sources = fallback_script(row)
 
-            voice_path = make_voice(dev, WORK / slug)
+            voice_path, windows = make_voice(dev, WORK / slug)
             duration = audio_duration(voice_path)
-            log(f"Voice: {duration:.1f}s")
+            log(f"Voice: {duration:.1f}s, {len(windows) if windows else 0} sentence windows")
 
             # Visuals: Pexels first, Pixabay as primary fallback.
             clip_urls = pexels_clips(row["keywords"], count=5)
@@ -537,7 +613,7 @@ def main():
             log(f"Clips: {len(clips)} downloaded")
 
             ass_path = WORK / f"{slug}.ass"
-            make_ass(hin, min(duration, TARGET_SECONDS), ass_path)
+            make_ass(hin, min(duration, TARGET_SECONDS), ass_path, windows=windows)
 
             out_mp4 = OUTPUT / f"{slug}.mp4"
             build_video(clips, voice_path, ass_path, out_mp4, duration)
